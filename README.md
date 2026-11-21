@@ -27,3 +27,4 @@
 uv run python -m findex.stats data/ --mode compare
 uv run pytest
 uv run ruff check .
+```
