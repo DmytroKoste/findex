@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from findex.index import Index
 from findex.tokenize import tokenize
 
-_QUERY_TOKEN_RE = re.compile(r'"[^"]+"|\(|\)|[^\s()]+')
+_QUERY_TOKEN_RE: re.Pattern[str] = re.compile(r'"[^"]+"|\(|\)|[^\s()]+')
 
 
 class QueryNode:
@@ -42,8 +42,10 @@ class Term(QueryNode):
 def _merge_adjacent_positions(pos_a: tuple[int, ...], pos_b: tuple[int, ...]) -> tuple[int, ...]:
     """Повертає позиції pos_b, для яких у pos_a існує pos_b - 1 (двовказівниковий merge)."""
     res: list[int] = []
-    i = j = 0
-    len_a, len_b = len(pos_a), len(pos_b)
+    i = 0
+    j = 0
+    len_a = len(pos_a)
+    len_b = len(pos_b)
     while i < len_a and j < len_b:
         target = pos_a[i] + 1
         if pos_b[j] == target:
@@ -171,6 +173,8 @@ class _Parser:
         self.consume()
         if tok.startswith('"') and tok.endswith('"'):
             words = tuple(tokenize(tok[1:-1]))
+            if not words:
+                raise ValueError("Порожня фраза в лапках")
             return Phrase(words)
         norm = tuple(tokenize(tok))
         if len(norm) == 1:
@@ -180,7 +184,7 @@ class _Parser:
             for w in norm[1:]:
                 node = And(node, Term(w))
             return node
-        return Term(tok.lower())
+        return Term(tok.casefold())
 
 
 def parse(query: str) -> QueryNode:

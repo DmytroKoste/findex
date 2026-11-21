@@ -1,72 +1,64 @@
-import argparse
+import logging
 import time
 import tracemalloc
 from collections import Counter
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
-from findex.corpus import read_documents
+from findex.corpus import iter_files
 from findex.tokenize import tokenize
 
-
-def compute_stats_lazy(root: Path, limit: int | None = None) -> tuple[int, int, Counter[str]]:
-    """Потоковий (лінивий) підрахунок статистики без завантаження всього корпусу в RAM."""
-    doc_count = 0
-    total_tokens = 0
-    vocab: Counter[str] = Counter()
-
-    for _doc_id, text in read_documents(root, limit=limit):
-        doc_count += 1
-        for token in tokenize(text):
-            total_tokens += 1
-            vocab[token] += 1
-
-    return doc_count, total_tokens, vocab
+log = logging.getLogger(__name__)
 
 
-def compute_stats_eager(root: Path, limit: int | None = None) -> tuple[int, int, Counter[str]]:
-    """Жадібний (eager) підрахунок: спершу вантажить усі тексти й токени у списки."""
-    docs = list(read_documents(root, limit=limit))
-    all_tokens = [token for _doc_id, text in docs for token in tokenize(text)]
-    vocab = Counter(all_tokens)
-    return len(docs), len(all_tokens), vocab
+@dataclass(frozen=True, slots=True)
+class CorpusStats:
+    num_docs: int
+    total_tokens: int
+    vocab_size: int
+    top_terms: list[tuple[str, int]]
+    elapsed_sec: float
+    peak_mem_mb: float
 
 
-def run_benchmark(label: str, fn, root: Path, limit: int | None) -> None:
+def compute_stats(files: Iterable[Path], top_n: int = 20) -> CorpusStats:
+    """Обчислює статистику корпусу за один прохід із вимірюванням часу та пам'яті."""
     tracemalloc.start()
     t0 = time.perf_counter()
 
-    doc_count, total_tokens, vocab = fn(root, limit=limit)
+    num_docs = 0
+    total_tokens = 0
+    term_counts: Counter[str] = Counter()
+
+    for path in files:
+        num_docs += 1
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for token in tokenize(text):
+            total_tokens += 1
+            term_counts[token] += 1
 
     elapsed = time.perf_counter() - t0
-    current_mem, peak_mem = tracemalloc.get_traced_memory()
+    _current_mem, peak_mem = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-    print(f"=== {label} ===")
-    print(f"Документів:        {doc_count}")
-    print(f"Усього токенів:    {total_tokens}")
-    print(f"Унікальних слів:   {len(vocab)}")
-    print(f"Топ-10 слів:       {vocab.most_common(10)}")
-    print(f"Час виконання:     {elapsed:.4f} с")
-    print(f"Пікова пам'ять:    {peak_mem / (1024 * 1024):.2f} МБ\n")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Статистика текстового корпусу findex")
-    parser.add_argument("corpus_dir", type=Path, help="Шлях до папки з текстами")
-    parser.add_argument("--limit", type=int, default=None, help="Обмеження кількості файлів")
-    parser.add_argument(
-        "--mode",
-        choices=["lazy", "eager", "compare"],
-        default="compare",
-        help="Режим обчислення: lazy, eager або compare",
+    log.info(
+        "Оброблено %d документів (%d токенів, словник %d) за %.3f с",
+        num_docs,
+        total_tokens,
+        len(term_counts),
+        elapsed,
     )
-    args = parser.parse_args()
+    return CorpusStats(
+        num_docs=num_docs,
+        total_tokens=total_tokens,
+        vocab_size=len(term_counts),
+        top_terms=term_counts.most_common(top_n),
+        elapsed_sec=elapsed,
+        peak_mem_mb=peak_mem / (1024 * 1024),
+    )
 
-    if args.mode in ("lazy", "compare"):
-        run_benchmark("LAZY (генератори)", compute_stats_lazy, args.corpus_dir, args.limit)
-    if args.mode in ("eager", "compare"):
-        run_benchmark("EAGER (списки в RAM)", compute_stats_eager, args.corpus_dir, args.limit)
 
-
-if __name__ == "__main__":
-    main()
+def analyze_corpus(root: Path, limit: int | None = None, top_n: int = 20) -> CorpusStats:
+    """Збирає статистику для директорії корпусу."""
+    return compute_stats(iter_files(root, limit=limit), top_n=top_n)

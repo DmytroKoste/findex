@@ -1,20 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "findex"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.4.0"
+description = "Пошуковий рушій з інвертованим індексом, мовою запитів, BM25/TF-IDF рейтингом та CLI"
 readme = "README.md"
-authors = [
-    { name = "Dmytro Kostenetsky", email = "dimakostenetsky@gmail.com" }
-]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "rich>=13.9.0",
+    "typer>=0.15.0",
+]
 
-[build-system]
-requires = ["uv_build>=0.13.9,<0.14.0"]
-build-backend = "uv_build"
+[project.scripts]
+findex = "findex.cli:app"
 
 [dependency-groups]
 dev = [
-    "pytest>=9.2.0",
-    "ruff>=0.17.6",
+    "hypothesis>=6.120.0",
+    "pyright>=1.1.390",
+    "pytest>=8.3.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/findex"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: тести, що виконуються довше однієї секунди",
+]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+include = ["src", "tests"]

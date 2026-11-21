@@ -1,133 +1,127 @@
-import json
+import logging
 import pickle
 import struct
 import sys
-import time
-from array import array
 from pathlib import Path
 
-from findex.index import (
-    ArrayInvertedIndex,
-    DocMeta,
-    InvertedIndex,
-    PlainPosting,
-    Posting,
-    timed,
-)
+from findex.index import DocMeta, Index, IndexFormat, Posting, timed
 
-# БЕЗПЕКА (pickle):
-# pickle.load() виконує довільний байткод Python під час десеріалізації об'єктів
-# (через спеціальний метод __reduce__). Якщо завантажити чужий або підмінений
-# файл індексу з мережі, зловмисник отримає віддалене виконання коду (RCE).
-# Тому pickle допустимий ЛИШЕ для власних локально згенерованих файлів.
+log = logging.getLogger(__name__)
 
 MAGIC = b"FIDX0002"
+HEADER_STRUCT = struct.Struct("<8sIII")
+DOC_LEN_STRUCT = struct.Struct("<II")
+META_STRUCT = struct.Struct("<IHH")
+TERM_STRUCT = struct.Struct("<HI")
+POSTING_STRUCT = struct.Struct("<II")
+POS_COUNT_STRUCT = struct.Struct("<H")
 
 
-def save_index(index: object, path: Path, fmt: str = "pickle") -> None:
-    """Зберігає індекс на диск у форматі 'pickle' або 'binary' (array('I') + JSON)."""
+def save_index(index: Index, path: Path, fmt: IndexFormat = "pickle") -> None:
+    """Серіалізує інвертований індекс на диск у форматі pickle або власному бінарному форматі."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     if fmt == "pickle":
         with path.open("wb") as f:
             pickle.dump(index, f, protocol=pickle.HIGHEST_PROTOCOL)
+        log.info("Збережено індекс у '%s' (pickle)", path)
         return
 
-    if fmt == "binary":
-        if not isinstance(index, InvertedIndex):
-            raise TypeError("Бінарний формат підтримує лише InvertedIndex")
+    with path.open("wb") as f:
+        f.write(
+            HEADER_STRUCT.pack(
+                MAGIC,
+                len(index.postings),
+                len(index.doc_lengths),
+                int(index.with_positions),
+            )
+        )
+        for doc_id, length in index.doc_lengths.items():
+            f.write(DOC_LEN_STRUCT.pack(doc_id, length))
 
-        terms_meta: dict[str, tuple[int, int]] = {}
-        payload = bytearray()
+        for doc_id, meta in index.doc_meta.items():
+            path_bytes = meta.path.encode("utf-8")
+            title_bytes = meta.title.encode("utf-8")
+            f.write(META_STRUCT.pack(doc_id, len(path_bytes), len(title_bytes)))
+            f.write(path_bytes)
+            f.write(title_bytes)
 
         for term, plist in index.postings.items():
-            doc_ids = array("I", (p.doc_id for p in plist))
-            tfs = array("I", (p.tf for p in plist))
-            offset = len(payload)
-            payload.extend(doc_ids.tobytes())
-            payload.extend(tfs.tobytes())
-            terms_meta[term] = (offset, len(plist))
+            term_bytes = term.encode("utf-8")
+            f.write(TERM_STRUCT.pack(len(term_bytes), len(plist)))
+            f.write(term_bytes)
+            for p in plist:
+                f.write(POSTING_STRUCT.pack(p.doc_id, p.tf))
+                if index.with_positions:
+                    f.write(POS_COUNT_STRUCT.pack(len(p.positions)))
+                    if p.positions:
+                        f.write(struct.pack(f"<{len(p.positions)}I", *p.positions))
 
-        header_obj = {
-            "doc_lengths": {str(k): v for k, v in index.doc_lengths.items()},
-            "doc_meta": {
-                str(k): [m.doc_id, m.path, m.title] for k, m in index.doc_meta.items()
-            },
-            "terms": terms_meta,
-        }
-        header_bytes = json.dumps(header_obj, ensure_ascii=False).encode("utf-8")
+    log.info("Збережено індекс у '%s' (binary)", path)
 
-        with path.open("wb") as f:
-            f.write(MAGIC)
-            f.write(struct.pack("<I", len(header_bytes)))
-            f.write(header_bytes)
-            f.write(payload)
-        return
-
-    raise ValueError(f"Невідомий формат: {fmt}")
 
 @timed
-def load_index(path: Path, fmt: str | None = None) -> InvertedIndex:
+def load_index(path: Path, fmt: IndexFormat | None = None) -> Index:
     """Завантажує індекс із диска (автовизначення формату за сигнатурою MAGIC)."""
+    if not path.exists():
+        raise FileNotFoundError(f"Файл індексу не знайдено: {path}")
+
     with path.open("rb") as f:
         head = f.read(len(MAGIC))
 
-    detected_fmt = fmt or ("binary" if head == MAGIC else "pickle")
+    detected_fmt: IndexFormat = fmt if fmt is not None else ("binary" if head == MAGIC else "pickle")
 
     if detected_fmt == "pickle":
         main_mod = sys.modules.get("__main__")
         if main_mod is not None:
-            for cls in (Posting, PlainPosting, DocMeta, InvertedIndex, ArrayInvertedIndex):
-                setattr(main_mod, cls.__name__, cls)
+            main_mod.Index = Index  # type: ignore[attr-defined]  # сумісність із pickle із __main__
+            main_mod.InvertedIndex = Index  # type: ignore[attr-defined]  # псевдонім для старих індексів
+            main_mod.Posting = Posting  # type: ignore[attr-defined]  # сумісність із pickle із __main__
+            main_mod.DocMeta = DocMeta  # type: ignore[attr-defined]  # сумісність із pickle із __main__
         with path.open("rb") as f:
-            return pickle.load(f)
+            loaded = pickle.load(f)
+        if not isinstance(loaded, Index):
+            raise TypeError(f"Очікувався об'єкт Index у '{path}', отримано {type(loaded).__name__}")
+        return loaded
 
-    if detected_fmt == "binary":
-        with path.open("rb") as f:
-            magic = f.read(len(MAGIC))
-            if magic != MAGIC:
-                raise ValueError("Невірна сигнатура бінарного індексу")
-            (header_len,) = struct.unpack("<I", f.read(4))
-            header_obj = json.loads(f.read(header_len).decode("utf-8"))
-            payload = f.read()
+    with path.open("rb") as f:
+        raw_header = f.read(HEADER_STRUCT.size)
+        if len(raw_header) < HEADER_STRUCT.size:
+            raise ValueError(f"Пошкоджений заголовок індексу: {path}")
+        magic, num_terms, num_docs, pos_flag = HEADER_STRUCT.unpack(raw_header)
+        if magic != MAGIC:
+            raise ValueError(f"Невірна сигнатура файлу індексу: {magic!r}")
+        with_positions = bool(pos_flag)
 
-        doc_lengths = {int(k): int(v) for k, v in header_obj["doc_lengths"].items()}
-        doc_meta = {
-            int(k): DocMeta(doc_id=v[0], path=v[1], title=v[2])
-            for k, v in header_obj["doc_meta"].items()
-        }
+        doc_lengths: dict[int, int] = {}
+        for _ in range(num_docs):
+            doc_id, length = DOC_LEN_STRUCT.unpack(f.read(DOC_LEN_STRUCT.size))
+            doc_lengths[doc_id] = length
+
+        doc_meta: dict[int, DocMeta] = {}
+        for _ in range(num_docs):
+            doc_id, path_len, title_len = META_STRUCT.unpack(f.read(META_STRUCT.size))
+            doc_path = f.read(path_len).decode("utf-8")
+            doc_title = f.read(title_len).decode("utf-8")
+            doc_meta[doc_id] = DocMeta(doc_id=doc_id, path=doc_path, title=doc_title)
 
         postings: dict[str, list[Posting]] = {}
-        mv = memoryview(payload)
-        for term, (offset, count) in header_obj["terms"].items():
-            byte_len = count * 4
-            doc_ids = array("I")
-            doc_ids.frombytes(mv[offset : offset + byte_len])
-            tfs = array("I")
-            tfs.frombytes(mv[offset + byte_len : offset + 2 * byte_len])
-            postings[term] = [Posting(doc_id=d, tf=t) for d, t in zip(doc_ids, tfs)]
+        for _ in range(num_terms):
+            term_len, plist_len = TERM_STRUCT.unpack(f.read(TERM_STRUCT.size))
+            term = f.read(term_len).decode("utf-8")
+            plist: list[Posting] = []
+            for _ in range(plist_len):
+                doc_id, tf = POSTING_STRUCT.unpack(f.read(POSTING_STRUCT.size))
+                positions: tuple[int, ...] = ()
+                if with_positions:
+                    (pos_count,) = POS_COUNT_STRUCT.unpack(f.read(POS_COUNT_STRUCT.size))
+                    if pos_count > 0:
+                        positions = struct.unpack(f"<{pos_count}I", f.read(4 * pos_count))
+                plist.append(Posting(doc_id=doc_id, tf=tf, positions=positions))
+            postings[term] = plist
 
-        return InvertedIndex(postings=postings, doc_lengths=doc_lengths, doc_meta=doc_meta)
-
-    raise ValueError(f"Невідомий формат: {detected_fmt}")
-
-
-def benchmark_formats(index: InvertedIndex) -> None:
-    """Міряє розмір файлу, час save та load для pickle і binary."""
-    print(f"{'Формат':<12} | {'Розмір файлу':<14} | {'Час save':<12} | {'Час load':<12}")
-    print("-" * 60)
-
-    for fmt in ("pickle", "binary"):
-        tmp = Path(f"_tmp_index_{fmt}.bin")
-        try:
-            t0 = time.perf_counter()
-            save_index(index, tmp, fmt=fmt)
-            save_ms = (time.perf_counter() - t0) * 1000
-
-            t1 = time.perf_counter()
-            _ = load_index(tmp, fmt=fmt)
-            load_ms = (time.perf_counter() - t1) * 1000
-
-            size_mb = tmp.stat().st_size / (1024 * 1024)
-            print(f"{fmt:<12} | {size_mb:>10.2f} MB | {save_ms:>9.1f} ms | {load_ms:>9.1f} ms")
-        finally:
-            if tmp.exists():
-                tmp.unlink()
+    return Index(
+        postings=postings,
+        doc_lengths=doc_lengths,
+        doc_meta=doc_meta,
+        with_positions=with_positions,
+    )

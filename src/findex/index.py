@@ -1,29 +1,34 @@
-import argparse
 import functools
+import logging
 import time
-import tracemalloc
 from array import array
 from collections import Counter, defaultdict
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, overload
 
 from findex.corpus import iter_files
 from findex.tokenize import tokenize
 
+log = logging.getLogger(__name__)
 
-def timed(fn):
-    """Декоратор вимірювання часу виконання функції у мілісекундах."""
+IndexVariant = Literal["slots", "plain", "array"]
+IndexFormat = Literal["pickle", "binary"]
+
+
+def timed[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
+    """Декоратор вимірювання часу виконання функції у мілісекундах через logging."""
 
     @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         t0 = time.perf_counter()
         try:
             return fn(*args, **kwargs)
         finally:
-            elapsed_ms = (time.perf_counter() - t0) * 1000
-            print(f"[timed] {fn.__name__}: {elapsed_ms:.2f} ms")
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            log.debug("%s виконано за %.2f ms", fn.__name__, elapsed_ms)
 
     return wrapper
 
@@ -59,26 +64,30 @@ class Index(Mapping[str, list[Posting]]):
         doc_meta: dict[int, DocMeta],
         with_positions: bool = False,
     ) -> None:
-        self.postings = postings
-        self.doc_lengths = doc_lengths
-        self.doc_meta = doc_meta
-        self.with_positions = with_positions
-        self._closed = False
+        self.postings: dict[str, list[Posting]] = postings
+        self.doc_lengths: dict[int, int] = doc_lengths
+        self.doc_meta: dict[int, DocMeta] = doc_meta
+        self.with_positions: bool = with_positions
+        self._closed: bool = False
 
     def __len__(self) -> int:
         return len(self.postings)
 
-    def __contains__(self, term: object) -> bool:
-        return term in self.postings
+    def __contains__(self, key: object) -> bool:
+        return key in self.postings
 
-    def __getitem__(self, term: str) -> list[Posting]:
-        return self.postings[term]
+    def __getitem__(self, key: str) -> list[Posting]:
+        return self.postings[key]
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.postings)
 
     def __repr__(self) -> str:
         return f"Index(terms={len(self):_}, docs={self.num_docs:_})"
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
 
     @property
     def num_docs(self) -> int:
@@ -106,13 +115,13 @@ InvertedIndex = Index
 
 @dataclass(slots=True)
 class ArrayInvertedIndex:
-    postings: dict[str, tuple[array, array]]
+    postings: dict[str, tuple[array[int], array[int]]]
     doc_lengths: dict[int, int]
     doc_meta: dict[int, DocMeta]
 
 
 @contextmanager
-def open_index(path: Path, fmt: str | None = None) -> Iterator[Index]:
+def open_index(path: Path, fmt: IndexFormat | None = None) -> Generator[Index]:
     """Контекстний менеджер для завантаження індексу та гарантованого звільнення ресурсів."""
     from findex.store import load_index
 
@@ -131,19 +140,51 @@ def _extract_title(text: str, fallback: str) -> str:
     return fallback
 
 
+@overload
+def build_index(
+    root: Path,
+    with_positions: bool = ...,
+    *,
+    variant: Literal["array"],
+    limit: int | None = ...,
+    on_doc: Callable[[int, Path], None] | None = ...,
+) -> ArrayInvertedIndex: ...
+
+
+@overload
+def build_index(
+    root: Path,
+    with_positions: bool = ...,
+    *,
+    variant: Literal["plain"],
+    limit: int | None = ...,
+    on_doc: Callable[[int, Path], None] | None = ...,
+) -> dict[str, list[PlainPosting]]: ...
+
+
+@overload
+def build_index(
+    root: Path,
+    with_positions: bool = ...,
+    variant: Literal["slots"] = ...,
+    limit: int | None = ...,
+    on_doc: Callable[[int, Path], None] | None = ...,
+) -> Index: ...
+
+
 @timed
 def build_index(
     root: Path,
     with_positions: bool = False,
-    variant: str = "slots",
+    variant: IndexVariant = "slots",
     limit: int | None = None,
+    on_doc: Callable[[int, Path], None] | None = None,
 ) -> Index | ArrayInvertedIndex | dict[str, list[PlainPosting]]:
     """Будує інвертований індекс одним проходом по лінивому потоку документів."""
-    if variant == "array":
-        raw_ids: dict[str, array] = defaultdict(lambda: array("I"))
-        raw_tfs: dict[str, array] = defaultdict(lambda: array("I"))
-    else:
-        raw_postings: dict[str, list] = defaultdict(list)
+    raw_ids: dict[str, array[int]] = defaultdict(lambda: array("I"))
+    raw_tfs: dict[str, array[int]] = defaultdict(lambda: array("I"))
+    raw_slots: dict[str, list[Posting]] = defaultdict(list)
+    raw_plain: dict[str, list[PlainPosting]] = defaultdict(list)
 
     doc_lengths: dict[int, int] = {}
     doc_meta: dict[int, DocMeta] = {}
@@ -170,47 +211,26 @@ def build_index(
                 raw_ids[term].append(doc_id)
                 raw_tfs[term].append(tf)
             elif variant == "plain":
-                raw_postings[term].append(PlainPosting(doc_id=doc_id, tf=tf))
+                raw_plain[term].append(PlainPosting(doc_id=doc_id, tf=tf))
             else:
                 positions = tuple(pos_map[term]) if with_positions else ()
-                raw_postings[term].append(Posting(doc_id=doc_id, tf=tf, positions=positions))
+                raw_slots[term].append(Posting(doc_id=doc_id, tf=tf, positions=positions))
+
+        if on_doc is not None:
+            on_doc(doc_id + 1, path)
 
     if variant == "array":
         packed = {term: (raw_ids[term], raw_tfs[term]) for term in raw_ids}
         return ArrayInvertedIndex(postings=packed, doc_lengths=doc_lengths, doc_meta=doc_meta)
 
     if variant == "plain":
-        return dict(raw_postings)
+        return dict(raw_plain)
 
-    return Index(
-        postings=dict(raw_postings),
+    ix = Index(
+        postings=dict(raw_slots),
         doc_lengths=doc_lengths,
         doc_meta=doc_meta,
         with_positions=with_positions,
     )
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Побудова інвертованого індексу findex")
-    parser.add_argument("corpus_dir", type=Path, help="Шлях до директорії корпусу")
-    parser.add_argument("--out", type=Path, default=Path("index.bin"), help="Файл збереження індексу")
-    parser.add_argument("--format", choices=["pickle", "binary"], default="pickle", help="Формат серіалізації")
-    parser.add_argument("--positions", action="store_true", help="Зберігати позиції токенів у постінгах")
-    args = parser.parse_args()
-
-    from findex.store import save_index
-
-    tracemalloc.start()
-    index = build_index(args.corpus_dir, with_positions=args.positions, variant="slots")
-    _, peak_bytes = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-
-    assert isinstance(index, Index)
-    save_index(index, args.out, fmt=args.format)
-    size_mb = args.out.stat().st_size / (1024 * 1024)
-    print(f"Побудовано {index!r} | Пік RAM: {peak_bytes / (1024 * 1024):.2f} МБ")
-    print(f"Збережено у '{args.out}' ({args.format}): {size_mb:.2f} МБ")
-
-
-if __name__ == "__main__":
-    main()
+    log.info("Побудовано %r", ix)
+    return ix

@@ -1,10 +1,18 @@
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
-TOKEN_RE = re.compile(r"[a-zа-яіїєґ0-9]+(?:['’][a-zа-яіїєґ0-9]+)?", re.IGNORECASE)
+TOKEN_RE: re.Pattern[str] = re.compile(r"[^\W_]+(?:['’-][^\W_]+)*", re.UNICODE)
 
 
 def tokenize(text: str) -> Iterator[str]:
-    """Генератор токенів у нижньому регістрі."""
+    """Ліниво розбиває рядок на нормалізовані (casefold) токени."""
     for match in TOKEN_RE.finditer(text):
-        yield match.group(0).lower()
+        token = match.group(0).casefold()
+        if token:
+            yield token
+
+
+def tokenize_all(texts: Iterable[str]) -> Iterator[str]:
+    """Ліниво токенізує потік текстів."""
+    for text in texts:
+        yield from tokenize(text)

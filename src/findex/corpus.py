@@ -1,21 +1,20 @@
 from collections.abc import Iterator
 from pathlib import Path
 
+SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".txt", ".md"})
+
 
 def iter_files(root: Path, limit: int | None = None) -> Iterator[Path]:
-    """Ліниво обходить усі .txt файли в директорії root (включно з підпапками)."""
+    """Ліниво обходить підтримувані текстові файли у директорії корпусу."""
+    if not root.exists():
+        raise FileNotFoundError(f"Директорію корпусу не знайдено: {root}")
+    if not root.is_dir():
+        raise NotADirectoryError(f"Очікувалась директорія корпусу: {root}")
+
     count = 0
-    for path in sorted(root.rglob("*.txt")):
-        if path.is_file():
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
             yield path
             count += 1
             if limit is not None and count >= limit:
                 return
-
-
-def read_documents(root: Path, limit: int | None = None) -> Iterator[tuple[str, str]]:
-    """Ліниво читає документи та віддає пари (doc_id, text)."""
-    for path in iter_files(root, limit=limit):
-        doc_id = path.stem
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        yield doc_id, text
