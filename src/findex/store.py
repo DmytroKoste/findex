@@ -12,6 +12,7 @@ from findex.index import (
     InvertedIndex,
     PlainPosting,
     Posting,
+    timed,
 )
 
 # БЕЗПЕКА (pickle):
@@ -63,7 +64,7 @@ def save_index(index: object, path: Path, fmt: str = "pickle") -> None:
 
     raise ValueError(f"Невідомий формат: {fmt}")
 
-
+@timed
 def load_index(path: Path, fmt: str | None = None) -> InvertedIndex:
     """Завантажує індекс із диска (автовизначення формату за сигнатурою MAGIC)."""
     with path.open("rb") as f:
