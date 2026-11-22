@@ -61,6 +61,8 @@ def test_worker_exception_propagates(sample_corpus: Path) -> None:
     def _boom(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("Помилка всередині воркера")
 
-    with patch("findex.index.build_partial", side_effect=_boom):
-        with pytest.raises(RuntimeError, match="Помилка всередині воркера"):
-            build_index(sample_corpus, executor="threads", workers=2)
+    with (
+        patch("findex.index.build_partial", side_effect=_boom),
+        pytest.raises(RuntimeError, match="Помилка всередині воркера"),
+    ):
+        build_index(sample_corpus, executor="threads", workers=2)
