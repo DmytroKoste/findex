@@ -162,7 +162,7 @@ def index_cmd(
 @app.command("search")
 def search_cmd(
     index_path: Annotated[Path, typer.Argument(help="Шлях до файлу індексу.")],
-    query: Annotated[str, typer.Argument(help='Пошуковий запит (AND/OR/NOT, дужки, фрази).')],
+    query: Annotated[str, typer.Argument(help="Пошуковий запит (AND/OR/NOT, дужки, фрази).")],
     k: Annotated[int, typer.Option("--k", "-k", help="Кількість топ-результатів.")] = 10,
     scorer: Annotated[ScorerChoice, typer.Option("--scorer", "-s", help="Функція ранжування.")] = ScorerChoice.bm25,
     as_json: Annotated[bool, typer.Option("--json", help="Вивести результати у форматі JSON Lines у stdout.")] = False,

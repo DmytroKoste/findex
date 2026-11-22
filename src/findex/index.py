@@ -163,10 +163,7 @@ def _chunk_indexed_paths(
         return []
     n = max(1, min(num_chunks, len(indexed_paths)))
     chunk_size = math.ceil(len(indexed_paths) / n)
-    return [
-        list(indexed_paths[i : i + chunk_size])
-        for i in range(0, len(indexed_paths), chunk_size)
-    ]
+    return [list(indexed_paths[i : i + chunk_size]) for i in range(0, len(indexed_paths), chunk_size)]
 
 
 def build_partial(
@@ -349,18 +346,12 @@ def build_index(
     if executor == "serial":
         num_chunks = max(1, workers)
         chunks = _chunk_indexed_paths(indexed_paths, num_chunks)
-        partials = [
-            build_partial(chunk, with_positions=with_positions, on_doc=on_doc)
-            for chunk in chunks
-        ]
+        partials = [build_partial(chunk, with_positions=with_positions, on_doc=on_doc) for chunk in chunks]
     elif executor == "threads":
         chunks = _chunk_indexed_paths(indexed_paths, workers)
         partials = []
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(build_partial, chunk, with_positions, None): chunk
-                for chunk in chunks
-            }
+            futures = {pool.submit(build_partial, chunk, with_positions, None): chunk for chunk in chunks}
             for fut in as_completed(futures):
                 chunk = futures[fut]
                 partials.append(fut.result())
@@ -371,10 +362,7 @@ def build_index(
         chunks = _chunk_indexed_paths(indexed_paths, workers)
         partials = []
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(build_partial, chunk, with_positions, None): chunk
-                for chunk in chunks
-            }
+            futures = {pool.submit(build_partial, chunk, with_positions, None): chunk for chunk in chunks}
             try:
                 for fut in as_completed(futures):
                     chunk = futures[fut]
