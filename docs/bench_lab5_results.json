@@ -1,0 +1,169 @@
+{
+  "cpu_name": "11th Gen Intel(R) Core(TM) i5-11400H @ 2.70GHz",
+  "physical_cores": 6,
+  "logical_cores": 12,
+  "num_files": 1000,
+  "rows": [
+    {
+      "runtime": "CPython 3.12 (GIL)",
+      "executor": "serial",
+      "workers": 1,
+      "wall": 0.8729192000027979,
+      "cpu": 0.859375,
+      "rss_mb": 64.828125,
+      "merge": 0.1584236999915447,
+      "speedup": 1.0
+    },
+    {
+      "runtime": "CPython 3.12 (GIL)",
+      "executor": "threads",
+      "workers": 2,
+      "wall": 1.0064666999969631,
+      "cpu": 1.015625,
+      "rss_mb": 68.95703125,
+      "merge": 0.20767699999851175,
+      "speedup": 0.8673105627890438
+    },
+    {
+      "runtime": "CPython 3.12 (GIL)",
+      "executor": "threads",
+      "workers": 4,
+      "wall": 0.9659704000077909,
+      "cpu": 1.125,
+      "rss_mb": 72.48828125,
+      "merge": 0.1638840999949025,
+      "speedup": 0.9036707542961538
+    },
+    {
+      "runtime": "CPython 3.12 (GIL)",
+      "executor": "threads",
+      "workers": 8,
+      "wall": 0.9904068000032566,
+      "cpu": 1.109375,
+      "rss_mb": 74.51953125,
+      "merge": 0.16868220000469591,
+      "speedup": 0.881374400902667
+    },
+    {
+      "runtime": "CPython 3.12 (GIL)",
+      "executor": "threads",
+      "workers": 12,
+      "wall": 0.9575725000031525,
+      "cpu": 1.078125,
+      "rss_mb": 77.33984375,
+      "merge": 0.1490102000097977,
+      "speedup": 0.9115959366000215
+    },
+    {
+      "runtime": "CPython 3.12 (GIL)",
+      "executor": "processes",
+      "workers": 2,
+      "wall": 1.3872221000056015,
+      "cpu": 0.65625,
+      "rss_mb": 84.1796875,
+      "merge": 0.10406129999319091,
+      "speedup": 0.6292569877594029
+    },
+    {
+      "runtime": "CPython 3.12 (GIL)",
+      "executor": "processes",
+      "workers": 4,
+      "wall": 1.1581316000083461,
+      "cpu": 0.78125,
+      "rss_mb": 80.58984375,
+      "merge": 0.07106950000161305,
+      "speedup": 0.7537305777655209
+    },
+    {
+      "runtime": "CPython 3.12 (GIL)",
+      "executor": "processes",
+      "workers": 8,
+      "wall": 1.1751895000052173,
+      "cpu": 0.890625,
+      "rss_mb": 80.3359375,
+      "merge": 0.1696756000019377,
+      "speedup": 0.7427901627770862
+    },
+    {
+      "runtime": "CPython 3.12 (GIL)",
+      "executor": "processes",
+      "workers": 12,
+      "wall": 1.2951622999971732,
+      "cpu": 0.953125,
+      "rss_mb": 83.0625,
+      "merge": 0.16546499999822117,
+      "speedup": 0.6739844110693333
+    },
+    {
+      "runtime": "Python 3.13t (no-GIL)",
+      "executor": "threads (serial)",
+      "workers": 1,
+      "wall": 0.9377202999894507,
+      "cpu": 0.921875,
+      "rss_mb": 0.0,
+      "merge": 0.08723570000438485,
+      "speedup": 0.9308950654183535
+    },
+    {
+      "runtime": "Python 3.13t (no-GIL)",
+      "executor": "threads",
+      "workers": 2,
+      "wall": 0.6176678000047104,
+      "cpu": 1.0,
+      "rss_mb": 0.0,
+      "merge": 0.09945049999805633,
+      "speedup": 1.4132502940838763
+    },
+    {
+      "runtime": "Python 3.13t (no-GIL)",
+      "executor": "threads",
+      "workers": 4,
+      "wall": 0.48500919999787584,
+      "cpu": 1.09375,
+      "rss_mb": 0.0,
+      "merge": 0.10374189999129158,
+      "speedup": 1.7997992615534322
+    },
+    {
+      "runtime": "Python 3.13t (no-GIL)",
+      "executor": "threads",
+      "workers": 8,
+      "wall": 0.5086443000036525,
+      "cpu": 1.59375,
+      "rss_mb": 0.0,
+      "merge": 0.12167290000070352,
+      "speedup": 1.7161682535251641
+    },
+    {
+      "runtime": "Python 3.13t (no-GIL)",
+      "executor": "threads",
+      "workers": 12,
+      "wall": 0.5449382000078913,
+      "cpu": 2.234375,
+      "rss_mb": 0.0,
+      "merge": 0.12753220000013243,
+      "speedup": 1.6018682485282865
+    }
+  ],
+  "io_bound_wall_s": {
+    "1": 0.054897099995287135,
+    "2": 0.045876999996835366,
+    "4": 0.03966879998915829,
+    "8": 0.046515800000634044,
+    "12": 0.05770430000848137
+  },
+  "race_312": {
+    "gil_enabled": true,
+    "expected": 800000,
+    "unsafe_actual": 800000,
+    "lost_updates": 0,
+    "safe_actual": 800000
+  },
+  "race_313t": {
+    "gil_enabled": false,
+    "expected": 800000,
+    "unsafe_actual": 312124,
+    "lost_updates": 487876,
+    "safe_actual": 800000
+  }
+}

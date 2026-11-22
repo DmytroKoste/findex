@@ -1,11 +1,14 @@
 import functools
 import logging
+import math
 import time
 from array import array
 from collections import Counter, defaultdict
-from collections.abc import Callable, Generator, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
+from operator import attrgetter
 from pathlib import Path
 from typing import Literal, overload
 
@@ -16,6 +19,7 @@ log = logging.getLogger(__name__)
 
 IndexVariant = Literal["slots", "plain", "array"]
 IndexFormat = Literal["pickle", "binary"]
+ExecutorKind = Literal["serial", "threads", "processes"]
 
 
 def timed[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
@@ -52,6 +56,16 @@ class DocMeta:
     doc_id: int
     path: str
     title: str
+
+
+@dataclass(slots=True)
+class PartialIndex:
+    """Частковий індекс для одного чанку документів (придатний для pickle)."""
+
+    postings: dict[str, list[Posting]]
+    doc_lengths: dict[int, int]
+    doc_meta: dict[int, DocMeta]
+    with_positions: bool = False
 
 
 class Index(Mapping[str, list[Posting]]):
@@ -140,6 +154,136 @@ def _extract_title(text: str, fallback: str) -> str:
     return fallback
 
 
+def _chunk_indexed_paths(
+    indexed_paths: Sequence[tuple[int, Path]],
+    num_chunks: int,
+) -> list[list[tuple[int, Path]]]:
+    """Розбиває нумеровані шляхи на неперетинні чанки з унікальними doc_id."""
+    if not indexed_paths:
+        return []
+    n = max(1, min(num_chunks, len(indexed_paths)))
+    chunk_size = math.ceil(len(indexed_paths) / n)
+    return [
+        list(indexed_paths[i : i + chunk_size])
+        for i in range(0, len(indexed_paths), chunk_size)
+    ]
+
+
+def build_partial(
+    chunk: Sequence[tuple[int, Path]],
+    with_positions: bool = False,
+    on_doc: Callable[[int, Path], None] | None = None,
+) -> PartialIndex:
+    """Будує частковий індекс для заданого списку пар (doc_id, path).
+
+    Функція верхнього рівня без замикань — безпечна для серіалізації через pickle
+    та запуску у ProcessPoolExecutor (включно з методом spawn).
+    """
+    raw_slots: dict[str, list[Posting]] = defaultdict(list)
+    doc_lengths: dict[int, int] = {}
+    doc_meta: dict[int, DocMeta] = {}
+
+    for doc_id, path in chunk:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        title = _extract_title(text, path.stem)
+        doc_meta[doc_id] = DocMeta(doc_id=doc_id, path=str(path), title=title)
+
+        tf_counter: Counter[str] = Counter()
+        pos_map: dict[str, list[int]] = defaultdict(list)
+        total_tokens = 0
+        for pos, token in enumerate(tokenize(text)):
+            total_tokens += 1
+            tf_counter[token] += 1
+            if with_positions:
+                pos_map[token].append(pos)
+
+        doc_lengths[doc_id] = total_tokens
+        for term, tf in tf_counter.items():
+            positions = tuple(pos_map[term]) if with_positions else ()
+            raw_slots[term].append(Posting(doc_id=doc_id, tf=tf, positions=positions))
+
+        if on_doc is not None:
+            on_doc(doc_id + 1, path)
+
+    return PartialIndex(
+        postings=dict(raw_slots),
+        doc_lengths=doc_lengths,
+        doc_meta=doc_meta,
+        with_positions=with_positions,
+    )
+
+
+def merge(partials: Iterable[PartialIndex]) -> Index:
+    """Об'єднує часткові індекси у фінальний Index зі збереженням порядку doc_id."""
+    merged_postings: dict[str, list[Posting]] = defaultdict(list)
+    doc_lengths: dict[int, int] = {}
+    doc_meta: dict[int, DocMeta] = {}
+    with_positions = False
+
+    for part in partials:
+        with_positions = with_positions or part.with_positions
+        doc_lengths.update(part.doc_lengths)
+        doc_meta.update(part.doc_meta)
+        for term, plist in part.postings.items():
+            merged_postings[term].extend(plist)
+
+    by_doc_id = attrgetter("doc_id")
+    for plist in merged_postings.values():
+        if len(plist) > 1:
+            plist.sort(key=by_doc_id)
+
+    ordered_lengths = dict(sorted(doc_lengths.items()))
+    ordered_meta = dict(sorted(doc_meta.items()))
+
+    return Index(
+        postings=dict(merged_postings),
+        doc_lengths=ordered_lengths,
+        doc_meta=ordered_meta,
+        with_positions=with_positions,
+    )
+
+
+def _build_legacy_variant(
+    root: Path,
+    with_positions: bool,
+    variant: Literal["array", "plain"],
+    limit: int | None,
+    on_doc: Callable[[int, Path], None] | None,
+) -> ArrayInvertedIndex | dict[str, list[PlainPosting]]:
+    raw_ids: dict[str, array[int]] = defaultdict(lambda: array("I"))
+    raw_tfs: dict[str, array[int]] = defaultdict(lambda: array("I"))
+    raw_plain: dict[str, list[PlainPosting]] = defaultdict(list)
+    doc_lengths: dict[int, int] = {}
+    doc_meta: dict[int, DocMeta] = {}
+
+    for doc_id, path in enumerate(iter_files(root, limit=limit)):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        title = _extract_title(text, path.stem)
+        doc_meta[doc_id] = DocMeta(doc_id=doc_id, path=str(path), title=title)
+
+        tf_counter: Counter[str] = Counter()
+        total_tokens = 0
+        for token in tokenize(text):
+            total_tokens += 1
+            tf_counter[token] += 1
+
+        doc_lengths[doc_id] = total_tokens
+        for term, tf in tf_counter.items():
+            if variant == "array":
+                raw_ids[term].append(doc_id)
+                raw_tfs[term].append(tf)
+            else:
+                raw_plain[term].append(PlainPosting(doc_id=doc_id, tf=tf))
+
+        if on_doc is not None:
+            on_doc(doc_id + 1, path)
+
+    if variant == "array":
+        packed = {term: (raw_ids[term], raw_tfs[term]) for term in raw_ids}
+        return ArrayInvertedIndex(postings=packed, doc_lengths=doc_lengths, doc_meta=doc_meta)
+    return dict(raw_plain)
+
+
 @overload
 def build_index(
     root: Path,
@@ -148,6 +292,9 @@ def build_index(
     variant: Literal["array"],
     limit: int | None = ...,
     on_doc: Callable[[int, Path], None] | None = ...,
+    workers: int = ...,
+    executor: ExecutorKind = ...,
+    merge_time_out: list[float] | None = ...,
 ) -> ArrayInvertedIndex: ...
 
 
@@ -159,6 +306,9 @@ def build_index(
     variant: Literal["plain"],
     limit: int | None = ...,
     on_doc: Callable[[int, Path], None] | None = ...,
+    workers: int = ...,
+    executor: ExecutorKind = ...,
+    merge_time_out: list[float] | None = ...,
 ) -> dict[str, list[PlainPosting]]: ...
 
 
@@ -169,6 +319,9 @@ def build_index(
     variant: Literal["slots"] = ...,
     limit: int | None = ...,
     on_doc: Callable[[int, Path], None] | None = ...,
+    workers: int = ...,
+    executor: ExecutorKind = ...,
+    merge_time_out: list[float] | None = ...,
 ) -> Index: ...
 
 
@@ -179,58 +332,74 @@ def build_index(
     variant: IndexVariant = "slots",
     limit: int | None = None,
     on_doc: Callable[[int, Path], None] | None = None,
+    workers: int = 1,
+    executor: ExecutorKind = "serial",
+    merge_time_out: list[float] | None = None,
 ) -> Index | ArrayInvertedIndex | dict[str, list[PlainPosting]]:
-    """Будує інвертований індекс одним проходом по лінивому потоку документів."""
-    raw_ids: dict[str, array[int]] = defaultdict(lambda: array("I"))
-    raw_tfs: dict[str, array[int]] = defaultdict(lambda: array("I"))
-    raw_slots: dict[str, list[Posting]] = defaultdict(list)
-    raw_plain: dict[str, list[PlainPosting]] = defaultdict(list)
+    """Будує інвертований індекс у серійному, потоковому або процесному режимі."""
+    if workers < 1:
+        raise ValueError(f"Кількість воркерів має бути >= 1, отримано: {workers}")
 
-    doc_lengths: dict[int, int] = {}
-    doc_meta: dict[int, DocMeta] = {}
+    if variant in ("array", "plain"):
+        return _build_legacy_variant(root, with_positions, variant, limit, on_doc)
 
-    for doc_id, path in enumerate(iter_files(root, limit=limit)):
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        title = _extract_title(text, path.stem)
-        doc_meta[doc_id] = DocMeta(doc_id=doc_id, path=str(path), title=title)
+    indexed_paths = list(enumerate(iter_files(root, limit=limit)))
+    partials: list[PartialIndex]
 
-        tf_counter: Counter[str] = Counter()
-        pos_map: dict[str, list[int]] = defaultdict(list)
-        total_tokens = 0
+    if executor == "serial":
+        num_chunks = max(1, workers)
+        chunks = _chunk_indexed_paths(indexed_paths, num_chunks)
+        partials = [
+            build_partial(chunk, with_positions=with_positions, on_doc=on_doc)
+            for chunk in chunks
+        ]
+    elif executor == "threads":
+        chunks = _chunk_indexed_paths(indexed_paths, workers)
+        partials = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(build_partial, chunk, with_positions, None): chunk
+                for chunk in chunks
+            }
+            for fut in as_completed(futures):
+                chunk = futures[fut]
+                partials.append(fut.result())
+                if on_doc is not None:
+                    for doc_id, path in chunk:
+                        on_doc(doc_id + 1, path)
+    elif executor == "processes":
+        chunks = _chunk_indexed_paths(indexed_paths, workers)
+        partials = []
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(build_partial, chunk, with_positions, None): chunk
+                for chunk in chunks
+            }
+            try:
+                for fut in as_completed(futures):
+                    chunk = futures[fut]
+                    partials.append(fut.result())
+                    if on_doc is not None:
+                        for doc_id, path in chunk:
+                            on_doc(doc_id + 1, path)
+            except BaseException:
+                for pending in futures:
+                    pending.cancel()
+                raise
+    else:
+        raise ValueError(f"Невідомий тип executor: {executor}")
 
-        for pos, token in enumerate(tokenize(text)):
-            total_tokens += 1
-            tf_counter[token] += 1
-            if with_positions and variant == "slots":
-                pos_map[token].append(pos)
+    t_merge0 = time.perf_counter()
+    ix = merge(partials)
+    merge_elapsed = time.perf_counter() - t_merge0
+    if merge_time_out is not None:
+        merge_time_out.append(merge_elapsed)
 
-        doc_lengths[doc_id] = total_tokens
-
-        for term, tf in tf_counter.items():
-            if variant == "array":
-                raw_ids[term].append(doc_id)
-                raw_tfs[term].append(tf)
-            elif variant == "plain":
-                raw_plain[term].append(PlainPosting(doc_id=doc_id, tf=tf))
-            else:
-                positions = tuple(pos_map[term]) if with_positions else ()
-                raw_slots[term].append(Posting(doc_id=doc_id, tf=tf, positions=positions))
-
-        if on_doc is not None:
-            on_doc(doc_id + 1, path)
-
-    if variant == "array":
-        packed = {term: (raw_ids[term], raw_tfs[term]) for term in raw_ids}
-        return ArrayInvertedIndex(postings=packed, doc_lengths=doc_lengths, doc_meta=doc_meta)
-
-    if variant == "plain":
-        return dict(raw_plain)
-
-    ix = Index(
-        postings=dict(raw_slots),
-        doc_lengths=doc_lengths,
-        doc_meta=doc_meta,
-        with_positions=with_positions,
+    log.info(
+        "Побудовано %r (executor=%s, workers=%d, merge=%.3fs)",
+        ix,
+        executor,
+        workers,
+        merge_elapsed,
     )
-    log.info("Побудовано %r", ix)
     return ix

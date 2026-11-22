@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 from enum import StrEnum
 from operator import attrgetter
@@ -14,7 +15,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn
 from rich.table import Table
 
 from findex.corpus import iter_files
-from findex.index import IndexFormat, build_index, open_index
+from findex.index import ExecutorKind, IndexFormat, build_index, open_index
 from findex.rank import make_scorer, search
 from findex.stats import compute_stats
 from findex.store import save_index
@@ -38,6 +39,12 @@ class ScorerChoice(StrEnum):
 class FormatChoice(StrEnum):
     pickle = "pickle"
     binary = "binary"
+
+
+class ExecutorChoice(StrEnum):
+    serial = "serial"
+    threads = "threads"
+    processes = "processes"
 
 
 def _format_rich_snippet(snippet: str) -> str:
@@ -97,6 +104,14 @@ def index_cmd(
     fmt: Annotated[FormatChoice, typer.Option("--format", "-f", help="Формат серіалізації.")] = FormatChoice.pickle,
     positions: Annotated[bool, typer.Option("--positions", help="Зберігати позиції токенів.")] = False,
     limit: Annotated[int | None, typer.Option("--limit", help="Обмежити кількість документів.")] = None,
+    workers: Annotated[
+        int,
+        typer.Option("--workers", "-w", min=1, help="Кількість паралельних воркерів."),
+    ] = os.cpu_count() or 1,
+    executor: Annotated[
+        ExecutorChoice,
+        typer.Option("--executor", "-e", help="Стратегія виконання: serial, threads або processes."),
+    ] = ExecutorChoice.processes,
 ) -> None:
     """Будує інвертований індекс корпусу та зберігає його на диск."""
     try:
@@ -105,6 +120,12 @@ def index_cmd(
         _fail(str(exc))
         return
 
+    chosen_executor: ExecutorKind = (
+        "serial"
+        if executor == ExecutorChoice.serial
+        else ("threads" if executor == ExecutorChoice.threads else "processes")
+    )
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -112,7 +133,10 @@ def index_cmd(
         TaskProgressColumn(),
         console=stderr_console,
     ) as progress:
-        task = progress.add_task("Індексація корпусу...", total=len(files))
+        task = progress.add_task(
+            f"Індексація ({chosen_executor}, w={workers})...",
+            total=len(files),
+        )
 
         def _advance(_processed: int, _path: Path) -> None:
             progress.advance(task, 1)
@@ -123,6 +147,8 @@ def index_cmd(
             variant="slots",
             limit=limit,
             on_doc=_advance,
+            workers=workers,
+            executor=chosen_executor,
         )
 
     chosen_fmt: IndexFormat = "binary" if fmt == FormatChoice.binary else "pickle"
@@ -136,14 +162,13 @@ def index_cmd(
 @app.command("search")
 def search_cmd(
     index_path: Annotated[Path, typer.Argument(help="Шлях до файлу індексу.")],
-    query: Annotated[str, typer.Argument(help='Пошуковий запит (AND/OR/NOT, дужки, "фрази").')],
+    query: Annotated[str, typer.Argument(help='Пошуковий запит (AND/OR/NOT, дужки, фрази).')],
     k: Annotated[int, typer.Option("--k", "-k", help="Кількість топ-результатів.")] = 10,
     scorer: Annotated[ScorerChoice, typer.Option("--scorer", "-s", help="Функція ранжування.")] = ScorerChoice.bm25,
     as_json: Annotated[bool, typer.Option("--json", help="Вивести результати у форматі JSON Lines у stdout.")] = False,
 ) -> None:
     """Виконує ранжований пошук за індексом."""
     active_scorer = make_scorer("tfidf" if scorer == ScorerChoice.tfidf else "bm25")
-
     try:
         with open_index(index_path) as ix:
             results = search(ix, query, scorer=active_scorer, k=k, with_snippets=True)
@@ -152,7 +177,6 @@ def search_cmd(
         return
 
     ordered = sorted(results, key=attrgetter("score"), reverse=True)
-
     if as_json:
         for res in ordered:
             payload = {
@@ -175,10 +199,8 @@ def search_cmd(
     table.add_column("Score", justify="right", style="green", no_wrap=True)
     table.add_column("Заголовок", style="bold")
     table.add_column("Сніпет")
-
     for res in ordered:
         table.add_row(str(res.doc_id), f"{res.score:.4f}", escape(res.title), _format_rich_snippet(res.snippet))
-
     stdout_console.print(table)
 
 
