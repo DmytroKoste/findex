@@ -12,7 +12,7 @@ from operator import attrgetter
 from pathlib import Path
 from typing import Literal, overload
 
-from findex.corpus import iter_files
+from findex.corpus import Document, iter_documents, iter_files
 from findex.tokenize import tokenize
 
 log = logging.getLogger(__name__)
@@ -154,24 +154,24 @@ def _extract_title(text: str, fallback: str) -> str:
     return fallback
 
 
-def _chunk_indexed_paths(
-    indexed_paths: Sequence[tuple[int, Path]],
+def _chunk_indexed_items[T](
+    indexed_items: Sequence[tuple[int, T]],
     num_chunks: int,
-) -> list[list[tuple[int, Path]]]:
-    """Розбиває нумеровані шляхи на неперетинні чанки з унікальними doc_id."""
-    if not indexed_paths:
+) -> list[list[tuple[int, T]]]:
+    """Розбиває нумеровані елементи на неперетинні чанки з унікальними doc_id."""
+    if not indexed_items:
         return []
-    n = max(1, min(num_chunks, len(indexed_paths)))
-    chunk_size = math.ceil(len(indexed_paths) / n)
-    return [list(indexed_paths[i : i + chunk_size]) for i in range(0, len(indexed_paths), chunk_size)]
+    n = max(1, min(num_chunks, len(indexed_items)))
+    chunk_size = math.ceil(len(indexed_items) / n)
+    return [list(indexed_items[i : i + chunk_size]) for i in range(0, len(indexed_items), chunk_size)]
 
 
 def build_partial(
-    chunk: Sequence[tuple[int, Path]],
+    chunk: Sequence[tuple[int, Path | Document]],
     with_positions: bool = False,
     on_doc: Callable[[int, Path], None] | None = None,
 ) -> PartialIndex:
-    """Будує частковий індекс для заданого списку пар (doc_id, path).
+    """Будує частковий індекс для заданого списку пар (doc_id, Path | Document).
 
     Функція верхнього рівня без замикань — безпечна для серіалізації через pickle
     та запуску у ProcessPoolExecutor (включно з методом spawn).
@@ -180,11 +180,19 @@ def build_partial(
     doc_lengths: dict[int, int] = {}
     doc_meta: dict[int, DocMeta] = {}
 
-    for doc_id, path in chunk:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        title = _extract_title(text, path.stem)
-        doc_meta[doc_id] = DocMeta(doc_id=doc_id, path=str(path), title=title)
+    for doc_id, item in chunk:
+        if isinstance(item, Document):
+            text = item.text
+            title = item.title
+            source_str = item.source
+            callback_path = Path(item.source)
+        else:
+            text = item.read_text(encoding="utf-8", errors="ignore")
+            title = _extract_title(text, item.stem)
+            source_str = str(item)
+            callback_path = item
 
+        doc_meta[doc_id] = DocMeta(doc_id=doc_id, path=source_str, title=title)
         tf_counter: Counter[str] = Counter()
         pos_map: dict[str, list[int]] = defaultdict(list)
         total_tokens = 0
@@ -193,14 +201,12 @@ def build_partial(
             tf_counter[token] += 1
             if with_positions:
                 pos_map[token].append(pos)
-
         doc_lengths[doc_id] = total_tokens
         for term, tf in tf_counter.items():
             positions = tuple(pos_map[term]) if with_positions else ()
             raw_slots[term].append(Posting(doc_id=doc_id, tf=tf, positions=positions))
-
         if on_doc is not None:
-            on_doc(doc_id + 1, path)
+            on_doc(doc_id + 1, callback_path)
 
     return PartialIndex(
         postings=dict(raw_slots),
@@ -231,7 +237,6 @@ def merge(partials: Iterable[PartialIndex]) -> Index:
 
     ordered_lengths = dict(sorted(doc_lengths.items()))
     ordered_meta = dict(sorted(doc_meta.items()))
-
     return Index(
         postings=dict(merged_postings),
         doc_lengths=ordered_lengths,
@@ -257,13 +262,11 @@ def _build_legacy_variant(
         text = path.read_text(encoding="utf-8", errors="ignore")
         title = _extract_title(text, path.stem)
         doc_meta[doc_id] = DocMeta(doc_id=doc_id, path=str(path), title=title)
-
         tf_counter: Counter[str] = Counter()
         total_tokens = 0
         for token in tokenize(text):
             total_tokens += 1
             tf_counter[token] += 1
-
         doc_lengths[doc_id] = total_tokens
         for term, tf in tf_counter.items():
             if variant == "array":
@@ -271,7 +274,6 @@ def _build_legacy_variant(
                 raw_tfs[term].append(tf)
             else:
                 raw_plain[term].append(PlainPosting(doc_id=doc_id, tf=tf))
-
         if on_doc is not None:
             on_doc(doc_id + 1, path)
 
@@ -340,15 +342,19 @@ def build_index(
     if variant in ("array", "plain"):
         return _build_legacy_variant(root, with_positions, variant, limit, on_doc)
 
-    indexed_paths = list(enumerate(iter_files(root, limit=limit)))
-    partials: list[PartialIndex]
+    indexed_items: list[tuple[int, Path | Document]]
+    if root.is_file():
+        indexed_items = list(enumerate(iter_documents(root, limit=limit)))
+    else:
+        indexed_items = list(enumerate(iter_files(root, limit=limit)))
 
+    partials: list[PartialIndex]
     if executor == "serial":
         num_chunks = max(1, workers)
-        chunks = _chunk_indexed_paths(indexed_paths, num_chunks)
+        chunks = _chunk_indexed_items(indexed_items, num_chunks)
         partials = [build_partial(chunk, with_positions=with_positions, on_doc=on_doc) for chunk in chunks]
     elif executor == "threads":
-        chunks = _chunk_indexed_paths(indexed_paths, workers)
+        chunks = _chunk_indexed_items(indexed_items, workers)
         partials = []
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(build_partial, chunk, with_positions, None): chunk for chunk in chunks}
@@ -356,10 +362,11 @@ def build_index(
                 chunk = futures[fut]
                 partials.append(fut.result())
                 if on_doc is not None:
-                    for doc_id, path in chunk:
-                        on_doc(doc_id + 1, path)
+                    for doc_id, item in chunk:
+                        cb_path = Path(item.source) if isinstance(item, Document) else item
+                        on_doc(doc_id + 1, cb_path)
     elif executor == "processes":
-        chunks = _chunk_indexed_paths(indexed_paths, workers)
+        chunks = _chunk_indexed_items(indexed_items, workers)
         partials = []
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(build_partial, chunk, with_positions, None): chunk for chunk in chunks}
@@ -368,8 +375,9 @@ def build_index(
                     chunk = futures[fut]
                     partials.append(fut.result())
                     if on_doc is not None:
-                        for doc_id, path in chunk:
-                            on_doc(doc_id + 1, path)
+                        for doc_id, item in chunk:
+                            cb_path = Path(item.source) if isinstance(item, Document) else item
+                            on_doc(doc_id + 1, cb_path)
             except BaseException:
                 for pending in futures:
                     pending.cancel()

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -9,12 +10,14 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.logging import RichHandler
 from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
 
-from findex.corpus import iter_files
+from findex.corpus import iter_documents, iter_files
+from findex.crawler import CrawlStats, crawl
 from findex.index import ExecutorKind, IndexFormat, build_index, open_index
 from findex.rank import make_scorer, search
 from findex.stats import compute_stats
@@ -97,9 +100,71 @@ def main_callback(
     _configure_logging(verbose)
 
 
+@app.command("crawl")
+def crawl_cmd(
+    seed_url: Annotated[str, typer.Argument(help="Початковий URL для обходу.")],
+    max_pages: Annotated[int, typer.Option("--max-pages", min=1, help="Максимальна кількість сторінок.")] = 500,
+    concurrency: Annotated[int, typer.Option("--concurrency", "-c", min=1, help="Загальна кількість воркерів.")] = 10,
+    per_host: Annotated[int, typer.Option("--per-host", min=1, help="Ліміт одночасних запитів на один хост.")] = 2,
+    delay: Annotated[float, typer.Option("--delay", min=0.0, help="Мінімальна пауза (с) на хост.")] = 0.2,
+    out: Annotated[Path, typer.Option("--out", "-o", help="Вихідний файл JSON Lines.")] = Path("data/crawl.jsonl"),
+    log_file: Annotated[Path, typer.Option("--log", help="Файл журналу обходу URL.")] = Path("crawl.log"),
+    debug: Annotated[bool, typer.Option("--debug", help="Увімкнути asyncio debug mode.")] = False,
+) -> None:
+    """Асинхронно обходить веб-сайт та потоково зберігає сторінки у JSON Lines."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    stats = CrawlStats()
+
+    def _render_dashboard() -> Table:
+        tbl = Table(title="findex crawl — живий монітор")
+        tbl.add_column("Метрика", style="bold cyan")
+        tbl.add_column("Значення", justify="right", style="green")
+        tbl.add_row("Зібрано сторінок", f"{stats.fetched} / {max_pages}")
+        tbl.add_row("Швидкість (pages/s)", f"{stats.pages_per_sec:.2f}")
+        tbl.add_row("Активні запити (in-flight)", str(stats.in_flight))
+        tbl.add_row("Помилки", str(stats.errors))
+        tbl.add_row("Глибина черги", str(stats.queue_depth))
+        return tbl
+
+    async def _run() -> int:
+        written = 0
+        with (
+            out.open("w", encoding="utf-8") as fp,
+            Live(_render_dashboard(), console=stderr_console, refresh_per_second=8) as live,
+        ):
+            async for page in crawl(
+                [seed_url],
+                max_pages=max_pages,
+                concurrency=concurrency,
+                per_host=per_host,
+                per_host_delay=delay,
+                log_path=log_file,
+                stats=stats,
+            ):
+                record = {
+                    "url": page.url,
+                    "title": page.title,
+                    "text": page.text,
+                    "fetched_at": page.fetched_at,
+                }
+                fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+                fp.flush()
+                written += 1
+                live.update(_render_dashboard())
+            live.update(_render_dashboard())
+        return written
+
+    total = asyncio.run(_run(), debug=debug)
+    stderr_console.print(
+        f"[green]Готово:[/green] зібрано {total} сторінок у [bold]{escape(str(out))}[/bold] "
+        f"за {stats.elapsed:.2f} с ({stats.pages_per_sec:.2f} pages/s)."
+    )
+
+
 @app.command("index")
 def index_cmd(
-    corpus: Annotated[Path, typer.Argument(help="Директорія з документами корпусу.")],
+    corpus: Annotated[Path, typer.Argument(help="Директорія з документами корпусу або файл .jsonl.")],
     out: Annotated[Path, typer.Option("--out", "-o", help="Шлях для збереження індексу.")] = Path("index.bin"),
     fmt: Annotated[FormatChoice, typer.Option("--format", "-f", help="Формат серіалізації.")] = FormatChoice.pickle,
     positions: Annotated[bool, typer.Option("--positions", help="Зберігати позиції токенів.")] = False,
@@ -115,8 +180,8 @@ def index_cmd(
 ) -> None:
     """Будує інвертований індекс корпусу та зберігає його на диск."""
     try:
-        files = list(iter_files(corpus, limit=limit))
-    except (FileNotFoundError, NotADirectoryError) as exc:
+        docs = list(iter_documents(corpus, limit=limit))
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         _fail(str(exc))
         return
 
@@ -135,7 +200,7 @@ def index_cmd(
     ) as progress:
         task = progress.add_task(
             f"Індексація ({chosen_executor}, w={workers})...",
-            total=len(files),
+            total=len(docs),
         )
 
         def _advance(_processed: int, _path: Path) -> None:
@@ -199,6 +264,7 @@ def search_cmd(
     table.add_column("Score", justify="right", style="green", no_wrap=True)
     table.add_column("Заголовок", style="bold")
     table.add_column("Сніпет")
+
     for res in ordered:
         table.add_row(str(res.doc_id), f"{res.score:.4f}", escape(res.title), _format_rich_snippet(res.snippet))
     stdout_console.print(table)
