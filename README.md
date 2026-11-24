@@ -186,7 +186,7 @@ uv run findex search data/py.idx "asyncio AND coroutine" -k 5
 
 ---
 
-﻿# findex — Веб-сервіс та HTTP API пошукового рушія (Lab 07)
+## Lab 7 — Веб-сервіс та HTTP API пошукового рушія
 
 Повнотекстовий пошуковий сервіс на базі **FastAPI**, **Pydantic** та **Jinja2**, розгорнутий у Docker-контейнері з публічною адресою.
 
