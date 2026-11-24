@@ -1,4 +1,21 @@
-# findex — пошуковий рушій на Python
+﻿# findex — пошуковий рушій на Python
+
+## 🌐 Live Demo (Lab 07)
+
+- **Public URL:** https://findex-zopq.onrender.com
+- **Interactive OpenAPI Docs:** https://findex-zopq.onrender.com/docs
+- **Health Check:** https://findex-zopq.onrender.com/health
+
+### Запуск веб-сервера та Docker
+
+```bash
+# Локальний запуск через CLI
+uv run findex serve --port 8000 --workers 1
+
+# Збірка та запуск у Docker
+docker build -t findex:0.7.0 .
+docker run --rm -e INDEX_PATH=/app/index.bin -p 8000:8000 findex:0.7.0
+
 
 Навчальний проєкт пошукового рушія, реалізований поетапно в межах 8 лабораторних робіт[cite: 8].
 
@@ -183,3 +200,4 @@ uv run findex index data/py_docs.jsonl --out data/py.idx
 
 # 3. Булевий та ранжований пошук (BM25) по зібраному корпусу
 uv run findex search data/py.idx "asyncio AND coroutine" -k 5
+
