@@ -1,21 +1,4 @@
-﻿# findex — пошуковий рушій на Python
-
-## 🌐 Live Demo (Lab 07)
-
-- **Public URL:** https://findex-zopq.onrender.com
-- **Interactive OpenAPI Docs:** https://findex-zopq.onrender.com/docs
-- **Health Check:** https://findex-zopq.onrender.com/health
-
-### Запуск веб-сервера та Docker
-
-```bash
-# Локальний запуск через CLI
-uv run findex serve --port 8000 --workers 1
-
-# Збірка та запуск у Docker
-docker build -t findex:0.7.0 .
-docker run --rm -e INDEX_PATH=/app/index.bin -p 8000:8000 findex:0.7.0
-
+# findex — пошуковий рушій на Python
 
 Навчальний проєкт пошукового рушія, реалізований поетапно в межах 8 лабораторних робіт[cite: 8].
 
@@ -201,3 +184,84 @@ uv run findex index data/py_docs.jsonl --out data/py.idx
 # 3. Булевий та ранжований пошук (BM25) по зібраному корпусу
 uv run findex search data/py.idx "asyncio AND coroutine" -k 5
 
+---
+
+﻿# findex — Веб-сервіс та HTTP API пошукового рушія (Lab 07)
+
+Повнотекстовий пошуковий сервіс на базі **FastAPI**, **Pydantic** та **Jinja2**, розгорнутий у Docker-контейнері з публічною адресою.
+
+## 🌐 Публічний доступ (Live Demo)
+
+- **Веб-інтерфейс пошуку:** https://findex-zopq.onrender.com
+- **Інтерактивна документація OpenAPI (Swagger UI):** https://findex-zopq.onrender.com/docs
+- **Перевірка стану сервісу (Health Check):** https://findex-zopq.onrender.com/health
+
+---
+
+## Архітектура та можливості
+
+- **Завантаження індексу через `lifespan`:** бінарний індекс (`index.bin`) завантажується один раз під час старту застосунку у `app.state.index` і коректно закривається при зупинці сервера.
+- **Типізація та валідація через Pydantic:**
+  - `Settings` (`pydantic-settings`) зчитує конфігурацію зі змінних оточення (`INDEX_PATH`, `HOST`, `PORT`, `CORS_ORIGINS`, `LOG_LEVEL`).
+  - Вхідні параметри запитів (`q`, `k`, `scorer`, `page`) та вихідні схеми (`SearchResponse`, `DocumentResponse`, `StatsResponse`, `HealthResponse`) автоматично валідуються з генерацією помилок `422 Unprocessable Entity` та OpenAPI-специфікації.
+- **Веб-інтерфейс (Jinja2 + CSS):**
+  - Головна сторінка пошуку `/` із вибором алгоритму ранжування (`BM25` / `TF-IDF`), пагінацією та безпечним підсвічуванням знайдених термів через `<mark>` (із попереднім HTML-екрануванням через `markupsafe.escape`).
+  - Сторінка перегляду повного тексту документа `/doc/{doc_id}`.
+- **Middleware та спостережуваність:**
+  - Додавання заголовка `X-Request-ID` до кожного запиту, логування часу виконання у мілісекундах та централізована обробка непередбачених винятків (`500 Internal Server Error`).
+  - Налаштований `CORSMiddleware` для безпечних `GET`-запитів з браузера.
+
+---
+
+## Маршрути API та UI
+
+| Метод | Шлях | Формат | Призначення |
+|---|---|---|---|
+| `GET` | `/` | HTML | Веб-інтерфейс пошуку з підсвіткою сніпетів та пагінацією |
+| `GET` | `/doc/{doc_id}` | HTML | Перегляд повного вмісту документа у браузері |
+| `GET` | `/search` | JSON | Пошук (`q`, `k`, `scorer=bm25\|tfidf`, `page`) із часом виконання `took_ms` |
+| `GET` | `/docs/{doc_id}` | JSON | Метадані та повний текст документа за ідентифікатором (`404`, якщо відсутній) |
+| `GET` | `/stats` | JSON | Статистика індексу (`num_docs`, `vocab_size`, `avg_doc_length`, `uptime_s`) |
+| `GET` | `/health` | JSON | Перевірка готовності індексу (`200 {"status": "ok"}` або `503`) |
+
+---
+
+## Локальний запуск та Docker
+
+### Локально через `uv`
+
+```bash
+# Запуск веб-сервера через CLI
+uv run findex serve --host 127.0.0.1 --port 8000 --workers 1
+
+# Перевірка якості коду, типів та тестів
+uv run ruff check .
+uv run pyright
+uv run pytest
+```
+
+### Збірка та запуск у Docker
+
+```bash
+docker build -t findex:0.7.0 .
+docker run --rm -e INDEX_PATH=/app/index.bin -p 8000:8000 findex:0.7.0
+```
+
+---
+
+## Результати навантажувального тестування (`GET /search?q=python&k=10`)
+
+Замір виконано скриптом `bench_lab7.py` за допомогою `httpx.AsyncClient`:
+
+| Target | Route | Concurrency | RPS | p50 (ms) | p95 (ms) | p99 (ms) |
+|---|---|---|---|---|---|---|
+| local, 1 worker, `async def` | `/search` | 50 | 174.6 | 188.06 | 735.88 | 1188.81 |
+| local, 1 worker, `def` | `/search` | 50 | 165.9 | 212.99 | 751.07 | 1149.23 |
+| local, 4 workers | `/search` | 50 | 142.9 | 235.51 | 888.21 | 1237.36 |
+| deployed (Render Free) | `/search` | 20 | 55.0 | 232.70 | 305.30 | 524.74 |
+
+### Висновки за результатами вимірів
+
+- **`async def` vs `def` (1 worker, concurrency = 50):** У варіанті `async def` синхронне обчислення ранжування BM25 блокує єдиний цикл подій (`event loop`) Uvicorn, через що хвіст затримок зростає до `p99 = 1188.81 ms`. Оголошення хендлера як звичайного `def` змушує FastAPI виконувати CPU-роботу в пулі потоків (`thread pool`), залишаючи `event loop` вільним для мережевого I/O та `/health` і зменшуючи `p99` до `1149.23 ms` (при цьому потоки все одно ділять процесорний час через **GIL**).
+- **1 worker vs 4 workers:** Запуск `--workers 4` створює 4 окремі процеси зі своїми незалежними GIL та копіями індексу в пам'яті. Коли на одній машині одночасно працюють і 4 процеси сервера, і генератор 50 паралельних запитів, додаткові витрати на перемикання контексту збільшують медіану (`p50 = 235.51 ms`).
+- **Локальний сервер vs `deployed` (Render Free, concurrency = 20):** На задеплоєному інстансі діє обмеження виділеного CPU безкоштовного тарифу та додається мережева затримка (TLS + RTT до дата-центру), що дає `55.0 RPS` та `p50 = 232.70 ms`, але при помірній конкурентності (`20` клієнтів) хвіст затримок залишається стабільним (`p95 = 305.30 ms`, `p99 = 524.74 ms`).
