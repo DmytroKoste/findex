@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} — findex</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <a class="brand" href="/"><span>findex</span> search</a>
+      <div class="meta-links">
+        <a href="javascript:history.back()">← Назад до результатів</a>
+        <a href="/docs/{{ doc_id }}" target="_blank">JSON API</a>
+      </div>
+    </header>
+
+    <h1>{{ title }}</h1>
+    <p class="summary">
+      doc_id: <strong>{{ doc_id }}</strong> · токенів: <strong>{{ length }}</strong> · джерело: <code>{{ path }}</code>
+    </p>
+    <div class="doc-body">{{ content }}</div>
+  </div>
+</body>
+</html>

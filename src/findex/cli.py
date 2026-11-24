@@ -317,3 +317,20 @@ def stats_cmd(
 
 if __name__ == "__main__":
     app()
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", "--host", help="Адреса прослуховування"),
+    port: int = typer.Option(8000, "--port", min=1, max=65535, help="Порт HTTP-сервера"),
+    workers: int = typer.Option(1, "--workers", min=1, max=32, help="Кількість процесів Uvicorn"),
+) -> None:
+    """Запускає веб-сервер FastAPI (API + UI)."""
+    import uvicorn
+
+    uvicorn.run(
+        "findex.web.app:app",
+        host=host,
+        port=port,
+        workers=workers,
+    )

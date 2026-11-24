@@ -1,0 +1,15 @@
+.venv
+.git
+.github
+.pytest_cache
+.ruff_cache
+.hypothesis
+__pycache__
+*.pyc
+.coverage
+htmlcov
+tests
+data/wiki
+data/*.jsonl
+bench_*.py
+fetch_corpus.py

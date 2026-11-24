@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>findex — Пошук у вебі</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <a class="brand" href="/"><span>findex</span> search</a>
+      <div class="meta-links">
+        <span>Документів: {{ num_docs }} · Термінів: {{ vocab_size }}</span>
+        <a href="/docs" target="_blank">OpenAPI (/docs)</a>
+        <a href="/stats" target="_blank">Stats</a>
+      </div>
+    </header>
+
+    <form class="search-form" method="get" action="/">
+      <input type="text" name="q" value="{{ query }}" placeholder="Введіть запит (напр. asyncio AND coroutine)..." autofocus>
+      <select name="scorer" aria-label="Алгоритм ранжування">
+        <option value="bm25" {% if scorer == 'bm25' %}selected{% endif %}>BM25</option>
+        <option value="tfidf" {% if scorer == 'tfidf' %}selected{% endif %}>TF-IDF</option>
+      </select>
+      <select name="k" aria-label="Результатів на сторінку">
+        <option value="5" {% if k == 5 %}selected{% endif %}>5</option>
+        <option value="10" {% if k == 10 %}selected{% endif %}>10</option>
+        <option value="20" {% if k == 20 %}selected{% endif %}>20</option>
+      </select>
+      <button type="submit">Шукати</button>
+    </form>
+
+    {% if error_msg %}
+      <div class="alert">{{ error_msg }}</div>
+    {% endif %}
+
+    {% if query and not error_msg %}
+      <div class="summary">
+        Знайдено <strong>{{ total }}</strong> результатів за <strong>{{ took_ms }} мс</strong> (сторінка {{ page }} із {{ pages_count }})
+      </div>
+
+      {% if results %}
+        {% for item in results %}
+          <article class="card">
+            <div class="card-header">
+              <a class="card-title" href="/doc/{{ item.doc_id }}">{{ item.title }}</a>
+              <span class="badge">#{{ item.doc_id }} · score {{ "%.4f"|format(item.score) }}</span>
+            </div>
+            {% if item.snippet %}
+              <p class="snippet">{{ item.snippet | highlight }}</p>
+            {% endif %}
+          </article>
+        {% endfor %}
+
+        {% if pages_count > 1 %}
+          <nav class="pagination">
+            {% if page > 1 %}
+              <a href="/?q={{ query | urlencode }}&scorer={{ scorer }}&k={{ k }}&page={{ page - 1 }}">← Попередня</a>
+            {% endif %}
+            <span>Сторінка {{ page }} / {{ pages_count }}</span>
+            {% if page < pages_count %}
+              <a href="/?q={{ query | urlencode }}&scorer={{ scorer }}&k={{ k }}&page={{ page + 1 }}">Наступна →</a>
+            {% endif %}
+          </nav>
+        {% endif %}
+      {% else %}
+        <div class="card">За запитом <strong>{{ query }}</strong> нічого не знайдено.</div>
+      {% endif %}
+    {% endif %}
+  </div>
+</body>
+</html>
